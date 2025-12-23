@@ -1,0 +1,24 @@
+MOU Compliance Rules:
+
+1. Purpose and Scope:
+   - The MOU must clearly define the purpose of the collaboration.
+   - The scope of activities should be well documented.
+
+2. Parties and Responsibilities:
+   - Each party must have clearly assigned responsibilities.
+   - Joint responsibilities must be explicitly mentioned.
+
+3. Confidentiality:
+   - Confidential information must not be shared with third parties.
+   - A clear process for handling confidential info must exist.
+
+4. Term and Termination:
+   - The term of the MOU must be specified.
+   - Termination clauses must include notice period and conditions.
+
+5. Dispute Resolution:
+   - There should be a method for resolving disputes, such as arbitration.
+   - Jurisdiction must be defined.
+
+6. Governing Law:
+   - The governing law for the MOU must be specified.

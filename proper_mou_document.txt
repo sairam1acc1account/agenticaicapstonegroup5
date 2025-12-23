@@ -2,8 +2,7 @@
 The purpose of this MOU is to establish a collaboration between Party A and Party B to jointly develop, market, and distribute software solutions in India. The scope includes software development, marketing, and joint sales initiatives.
 
 [Clause: Parties and Responsibilities]
-Party A is responsible for providing technical expertise, software development, and project management. Party B is responsible for market research, customer engagement, and distribution channels. Both parties will meet monthly to align on strategy.
-
+Party A is responsible for providing technical expertise, software development, and project management. Party B is not responsible for anything.
 [Clause: Confidentiality]
 All proprietary information shared between Party A and Party B will remain confidential. No information will be disclosed to third parties without prior written consent.
 

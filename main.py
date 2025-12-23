@@ -1,142 +1,167 @@
 import os
 import json
-import numpy as np
 from dotenv import load_dotenv
-from azure.storage.blob import BlobServiceClient
 from openai import AzureOpenAI
+from azure.search.documents import SearchClient
+from azure.core.credentials import AzureKeyCredential
+from azure.core.pipeline.transport import RequestsTransport
+import warnings
+from urllib3.exceptions import InsecureRequestWarning
 
-# ---------------- Load .env ----------------
+# Suppress SSL warnings globally
+warnings.simplefilter("ignore", InsecureRequestWarning)
+# ---------------- ENV ----------------
 load_dotenv()
 
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-AZURE_OPENAI_EMBEDDING_MODEL = os.getenv("AZURE_OPENAI_EMBEDDING_MODEL")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
+AZURE_OPENAI_CHAT_MODEL = os.getenv("AZURE_OPENAI_CHAT_MODEL")
 
-AZURE_BLOB_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-AZURE_BLOB_CONTAINER = os.getenv("AZURE_STORAGE_CONTAINER_NAME", "legal-documents")
+AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
+AZURE_SEARCH_KEY = os.getenv("AZURE_SEARCH_API_KEY")
+AZURE_SEARCH_INDEX = "mou_index"
 
-# ---------------- OpenAI Client ----------------
-client = AzureOpenAI(
+# ---------------- CLIENTS ----------------
+openai_client = AzureOpenAI(
     api_key=AZURE_OPENAI_API_KEY,
     azure_endpoint=AZURE_OPENAI_ENDPOINT,
     api_version=AZURE_OPENAI_API_VERSION
 )
 
-def get_embedding(text: str):
-    return client.embeddings.create(
-        model=AZURE_OPENAI_EMBEDDING_MODEL,
-        input=text
-    ).data[0].embedding
+# SSL bypass (corp network fix)
+transport = RequestsTransport(connection_verify=False)
 
-# ---------------- Connect to Blob ----------------
-blob_service = BlobServiceClient.from_connection_string(AZURE_BLOB_CONNECTION_STRING)
-container_client = blob_service.get_container_client(AZURE_BLOB_CONTAINER)
+search_client = SearchClient(
+    endpoint=AZURE_SEARCH_ENDPOINT,
+    index_name=AZURE_SEARCH_INDEX,
+    credential=AzureKeyCredential(AZURE_SEARCH_KEY),
+    transport=transport
+)
 
-def load_blob_text(blob_name):
-    blob_client = container_client.get_blob_client(blob_name)
-    return blob_client.download_blob().readall().decode("utf-8")
+# ---------------- AGENT 1: INGEST ----------------
+def agent_ingest_mou(path="proper_mou_document.txt"):
+    print("\n🤖 Agent [Ingestion]: Loading MOU")
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    print(f"✅ Agent [Ingestion]: Loaded {len(text.split())} words")
+    return text
 
-# ---------------- Utils ----------------
-def chunk_text(text, chunk_size=400):
-    words = text.split()
-    return [" ".join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
+# ---------------- AGENT 2: CLAUSE EXTRACTION ----------------
+CLAUSE_KEYS = [
+    "purpose",
+    "parties_responsibilities",
+    "confidentiality",
+    "term_termination"
+]
 
-def cosine_similarity(vec1, vec2):
-    vec1 = np.array(vec1)
-    vec2 = np.array(vec2)
-    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+def agent_extract_clauses(mou_text):
+    print("\n🤖 Agent [Clause Extraction]: Extracting clauses")
 
-# ---------------- Step 1: Prepare RAG JSONs ----------------
-os.makedirs("data", exist_ok=True)
+    response = openai_client.chat.completions.create(
+        model=AZURE_OPENAI_CHAT_MODEL,
+        messages=[
+            {"role": "system", "content": "Extract legal clauses from MOU."},
+            {"role": "user", "content": mou_text}
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "mou_clauses",
+                "schema": {
+                    "type": "object",
+                    "properties": {k: {"type": "string"} for k in CLAUSE_KEYS},
+                    "required": CLAUSE_KEYS
+                }
+            }
+        }
+    )
 
-# Rules JSON
-rules_text = load_blob_text("all_rules.txt")
-rules_chunks = chunk_text(rules_text)
-rules_json = []
-for i, chunk in enumerate(rules_chunks):
-    rules_json.append({
-        "id": f"rule_{i+1}",
-        "text": chunk,
-        "embedding": get_embedding(chunk)
-    })
-with open("data/rules.json", "w", encoding="utf-8") as f:
-    json.dump(rules_json, f, indent=2)
-print(f"Saved {len(rules_json)} rule chunks to data/rules.json")
-
-# MOU JSON
-mou_text = load_blob_text("proper_mou_document.txt")
-mou_chunks_list = chunk_text(mou_text)
-mou_json = []
-for i, chunk in enumerate(mou_chunks_list):
-    mou_json.append({
-        "id": f"mou_{i+1}",
-        "text": chunk,
-        "embedding": get_embedding(chunk)
-    })
-with open("data/mou.json", "w", encoding="utf-8") as f:
-    json.dump(mou_json, f, indent=2)
-print(f"Saved {len(mou_json)} MOU chunks to data/mou.json")
-
-# ---------------- Step 2: Load JSONs ----------------
-with open("data/rules.json", "r", encoding="utf-8") as f:
-    rules = json.load(f)
-
-with open("data/mou.json", "r", encoding="utf-8") as f:
-    mou_chunks = json.load(f)
-
-# ---------------- Agents ----------------
-
-# Clause Extraction Agent
-def extract_clauses(mou_chunks):
-    clauses = {}
-    markers = ["Purpose and Scope", "Parties and Responsibilities", "Confidentiality", "Term and Termination",
-               "Dispute Resolution", "Governing Law"]
-    for sec in markers:
-        sec_text = ""
-        for chunk in mou_chunks:
-            # simple case-insensitive match for clause start
-            if sec.lower() in chunk["text"].lower():
-                sec_text += chunk["text"].strip() + "\n"
-        clauses[sec] = sec_text.strip() if sec_text else "Not found"
+    try:
+        clauses = json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        print("[WARN] JSON parsing failed, using fallback")
+        clauses = {k: "Parsing failed" for k in CLAUSE_KEYS}
     return clauses
 
-# Rule Retrieval Agent
-def retrieve_rules(rules_json):
-    return rules_json  # return full objects with embeddings
+# ---------------- AGENT 3: RAG RULE RETRIEVAL ----------------
+def agent_retrieve_rule(clause_name):
+    print(f"\n🤖 Agent [RAG Retrieval]: Searching rule for '{clause_name}'")
 
-# Compliance Validation Agent
-def validate_compliance(clauses, rules_json, threshold=0.75):
-    findings = []
-    compliant = True
-    for sec, text in clauses.items():
-        text_emb = get_embedding(text)
-        sims = [cosine_similarity(text_emb, rule["embedding"]) for rule in rules_json]
-        max_sim = max(sims)
-        if max_sim < threshold:
-            compliant = False
-            findings.append(f"{sec} does not match any rule (max similarity={max_sim:.2f})")
-    findings_text = "All clauses meet rules" if compliant else "; ".join(findings)
-    return {"compliance_status": "Compliant" if compliant else "Non-compliant",
-            "findings": findings_text}
+    results = search_client.search(
+        search_text=clause_name.replace("_", " "),
+        top=1,
+        select=["content"]
+    )
 
-# Summary Agent
-def generate_summary(clauses, compliance):
-    summary = "Executive Summary:\n\n"
-    for key, val in clauses.items():
-        summary += f"{key}:\n{val}\n\n"
-    summary += f"Compliance Status: {compliance['compliance_status']}\nFindings: {compliance['findings']}"
-    return summary
+    for doc in results:
+        print("✅ Rule found")
+        return doc["content"]
 
-# ---------------- Step 3: Run Pipeline ----------------
-clauses = extract_clauses(mou_chunks)
-print("\n--- Extracted Clauses ---\n", clauses)
+    print("⚠ No rule found")
+    return "No rule found"
 
-rules_json = retrieve_rules(rules)
-print(f"\nRetrieved {len(rules_json)} rules from RAG JSON")
+# ---------------- AGENT 4: COMPLIANCE CHECK ----------------
+def agent_validate_clause(clause_name, clause_text, rule_text):
+    print(f"\n🤖 Agent [Compliance ({clause_name})]:")
 
-compliance = validate_compliance(clauses, rules_json)
-print("\n--- Compliance Validation ---\n", compliance)
+    response = openai_client.chat.completions.create(
+        model=AZURE_OPENAI_CHAT_MODEL,
+        messages=[
+            {"role": "system", "content": "You are a legal compliance validator."},
+            {"role": "user", "content": f"Rule:\n{rule_text}\n\nClause:\n{clause_text}"}
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "compliance_result",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string", "enum": ["Compliant", "Non-compliant"]},
+                        "issues": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["status", "issues"]
+                }
+            }
+        }
+    )
 
-summary = generate_summary(clauses, compliance)
-print("\n--- Executive Summary ---\n", summary)
+    try:
+        result = json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        result = {"status": "Non-compliant", "issues": ["Parsing failed"]}
+    return result
+
+# ---------------- ORCHESTRATOR ----------------
+def run_system():
+    print("\n=== Multi-Agent RAG Legal Compliance System ===")
+
+    mou = agent_ingest_mou()
+    clauses = agent_extract_clauses(mou)
+
+    final = {"compliance_status": "Compliant", "findings": []}
+
+    for name in CLAUSE_KEYS:
+        text = clauses.get(name, "Parsing failed")
+        rule = agent_retrieve_rule(name)
+        result = agent_validate_clause(name, text, rule)
+
+        if result["status"] == "Non-compliant":
+            final["compliance_status"] = "Non-compliant"
+            final["findings"].append({"clause": name, "issues": result.get("issues", ["Parsing failed"])})
+
+    print("\n📄 Final Compliance Report")
+    print(json.dumps(final, indent=2))
+
+# ---------------- MAIN BOT ----------------
+if __name__ == "__main__":
+    run_system()
+
+    print("\n=== Interactive Legal Compliance Bot ===\n")
+    while True:
+        user_input = input("[User] ")
+        if user_input.lower() in ["exit", "quit"]:
+            print("👋 Exiting bot.")
+            break
+        print("🤖 Bot: I am a multi-agent system. Currently, I processed ingestion, clause extraction, RAG retrieval, and compliance check.")

@@ -1,0 +1,20 @@
+# Azure OpenAI SDK
+openai>=1.0.0
+
+# Azure Cognitive Search SDK
+azure-search-documents>=11.5.0
+
+# Azure Core for credentials and transport
+azure-core>=1.27.0
+
+# For reading environment variables
+python-dotenv>=1.0.0
+
+# Optional, if using RequestsTransport (SSL bypass)
+requests>=2.31.0
+
+# JSON handling (builtin, so optional)
+# json is part of Python standard library
+
+# urllib3 (to suppress SSL warnings)
+urllib3>=2.0.0
